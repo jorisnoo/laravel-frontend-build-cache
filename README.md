@@ -69,3 +69,7 @@ $FORGE_PHP artisan optimize
 ## License
 
 The MIT License (MIT). See [LICENSE.md](LICENSE.md).
+
+## Maintainer releases
+
+See [RELEASING.md](RELEASING.md) for versioning, changelog entries and the release command.
