@@ -7,12 +7,15 @@ manifest, and stores the result for later deployments.
 ## Requirements
 
 - PHP 8.3+
-- Laravel 11, 12, or 13
+- Laravel 12 or 13. Laravel 11 is not supported.
 
 ## Installation
 
+Install the stable GitHub release through Composer's VCS support:
+
 ```bash
-composer require jorisnoo/laravel-frontend-build-cache
+composer config repositories.frontend-build-cache vcs https://github.com/jorisnoo/laravel-frontend-build-cache
+composer require jorisnoo/laravel-frontend-build-cache:^0.1
 ```
 
 Laravel discovers the service provider automatically.
@@ -25,13 +28,18 @@ Replace the npm install/build lines in the deployment script with:
 php artisan deploy:build
 ```
 
-The command fingerprints package and npm configuration files, common Vite/Tailwind/PostCSS
-configuration, Vite environment files, and everything in `resources/`. Symlinked files and
-directories are followed and their contents are included.
+The fingerprint includes the resolved install/build commands, output and manifest paths, npm
+and Composer lockfiles, package/config files, Vite environment files, and files under
+`app/`, `content/`, `lang/`, `resources/` and `routes/`. Missing inputs are skipped and symlinked
+inputs are followed. Add every other path scanned by Tailwind `@source` or imported by Vite
+to `inputs`/`input_patterns`. For example, list local path repositories or patched vendor
+sources whose changes are not represented by `composer.lock`. If upgrading a published config,
+merge the new default inputs into it.
 
 On Forge, cached builds live at
 `$FORGE_SITE_ROOT/.deploy-cache/frontend-builds`, outside individual releases. Elsewhere they use
-`storage/framework/cache/deploy-builds`. The five newest builds are retained by default.
+`storage/framework/cache/deploy-builds`. The five newest builds are retained by default;
+the just-stored build is always kept, even with `keep` set to zero or null.
 
 Available options:
 
@@ -57,6 +65,18 @@ The published `config/frontend-build-cache.php` controls:
 - an optional persistent cache directory;
 - install and build commands;
 - the number of cached builds retained.
+
+### SSR and other outputs
+
+Set `build_command` to your combined client/SSR build command and `additional_outputs` to
+`['bootstrap/ssr']` (or your SSR output path). Keep `output_directory` set to the client
+build containing `manifest`. The command caches all listed directories together, and fails
+if one is missing or if it finds an unlisted `bootstrap/ssr` bundle. Use separate output
+directories that do not contain each other or the cache.
+
+With additional outputs configured, `install_command` runs on cache hits too: SSR servers
+need the current release's Node dependencies. `node_modules` is not a portable build output
+and should not be listed. With only the client output, a hit skips both Node commands.
 
 ## Deployment example
 

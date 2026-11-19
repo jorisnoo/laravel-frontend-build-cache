@@ -2,12 +2,11 @@ name: run-tests
 
 on:
   push:
-    paths:
-      - '**.php'
-      - '.github/workflows/run-tests.yml'
-      - 'phpunit.xml.dist'
-      - 'composer.json'
-      - 'composer.lock'
+    branches: ['**']
+  pull_request:
+
+permissions:
+  contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -16,15 +15,13 @@ concurrency:
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     strategy:
       fail-fast: true
       matrix:
         php: [8.3, 8.4, 8.5]
-        laravel: [11.*, 12.*, 13.*]
+        laravel: [12.*, 13.*]
         include:
-          - laravel: 11.*
-            testbench: 9.*
           - laravel: 12.*
             testbench: 10.*
           - laravel: 13.*
@@ -44,8 +41,18 @@ jobs:
 
       - name: Install dependencies
         run: |
-          composer require "laravel/framework:${{ matrix.laravel }}" "orchestra/testbench:${{ matrix.testbench }}" --no-interaction --no-update
-          composer update --prefer-stable --prefer-dist --no-interaction
+          composer update --with "laravel/framework:${{ matrix.laravel }}" --with "orchestra/testbench:${{ matrix.testbench }}" --prefer-stable --prefer-dist --no-interaction
 
-      - name: Execute tests
-        run: vendor/bin/pest --ci
+      - name: Check package
+        run: composer check
+
+  required:
+    name: Package checks
+    needs: test
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require all supported PHP and Laravel combinations to pass
+        env:
+          MATRIX_RESULT: ${{ needs.test.result }}
+        run: test "$MATRIX_RESULT" = success

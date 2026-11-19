@@ -70,6 +70,59 @@ class FrontendBuildCacheTest extends TestCase
         $this->assertNotSame($fingerprint, $cache->fingerprint($inputs));
     }
 
+    public function test_every_default_application_source_and_lockfile_changes_the_fingerprint(): void
+    {
+        $cache = new FrontendBuildCache($this->root, $this->cacheDirectory);
+        foreach (['content/page.md', 'lang/en.php', 'routes/web.php', 'app/Page.php', 'config/frontend-build-cache.php', 'composer.lock'] as $file) {
+            $path = $this->root.'/'.$file;
+            (new Filesystem)->ensureDirectoryExists(dirname($path));
+            file_put_contents($path, 'before');
+            $before = $cache->fingerprint($cache->defaultInputs());
+            file_put_contents($path, 'after');
+            $this->assertNotSame($before, $cache->fingerprint($cache->defaultInputs()), $file);
+        }
+    }
+
+    public function test_commands_manifest_and_outputs_each_change_the_key(): void
+    {
+        $cache = new FrontendBuildCache($this->root, $this->cacheDirectory);
+        $key = $cache->fingerprint([], ['npm', 'ci'], ['npm', 'run', 'build']);
+        $this->assertNotSame($key, $cache->fingerprint([], ['npm', 'install'], ['npm', 'run', 'build']));
+        $this->assertNotSame($key, $cache->fingerprint([], ['npm', 'ci'], ['npm', 'run', 'staging']));
+        foreach ([
+            ['public/build', 'public/build/other.json', []],
+            ['public', 'public/build/manifest.json', []],
+            ['public/build', 'public/build/manifest.json', ['bootstrap/ssr']],
+        ] as [$output, $manifest, $extra]) {
+            $other = new FrontendBuildCache($this->root, $this->cacheDirectory, $output, $manifest, $extra);
+            $this->assertNotSame($key, $other->fingerprint([], ['npm', 'ci'], ['npm', 'run', 'build']));
+        }
+    }
+
+    public function test_pruning_preserves_current_build_and_removes_only_old_staging_copies(): void
+    {
+        mkdir($this->cacheDirectory);
+        $current = str_repeat('a', 64);
+        $previous = str_repeat('b', 64);
+        $stale = '.'.$current.'-deadbeef0000';
+        $active = '.'.$current.'-deadbeef1111';
+        foreach ([$current, $previous, $stale, $active, '.unrelated'] as $entry) {
+            mkdir($this->cacheDirectory.'/'.$entry);
+        }
+        touch($this->cacheDirectory.'/'.$stale, time() - 7200);
+        touch($this->cacheDirectory.'/.unrelated', time() - 7200);
+        touch($this->cacheDirectory.'/'.$current, time() - 60);
+        $cache = new FrontendBuildCache($this->root, $this->cacheDirectory);
+        $cache->prune(0, $current);
+
+        foreach ([$current, $active, '.unrelated'] as $entry) {
+            $this->assertDirectoryExists($this->cacheDirectory.'/'.$entry);
+        }
+        $this->assertDirectoryDoesNotExist($this->cacheDirectory.'/'.$previous);
+        $this->assertDirectoryDoesNotExist($this->cacheDirectory.'/'.$stale);
+        $this->assertFalse($cache->restore($previous));
+    }
+
     public function test_it_fingerprints_symlinked_input_contents(): void
     {
         mkdir($this->sharedDirectory, 0777, true);

@@ -6,6 +6,12 @@ return [
         'package-lock.json',
         'npm-shrinkwrap.json',
         '.npmrc',
+        'composer.lock',
+        'config/frontend-build-cache.php',
+        'app',
+        'content',
+        'lang',
+        'routes',
         'resources',
     ],
 
@@ -21,6 +27,8 @@ return [
     ],
 
     'output_directory' => 'public/build',
+    // For SSR, add 'bootstrap/ssr'. Additional outputs require an install on hits.
+    'additional_outputs' => [],
     'manifest' => 'public/build/manifest.json',
 
     // Null uses $FORGE_SITE_ROOT/.deploy-cache/frontend-builds on Forge and

@@ -24,47 +24,60 @@ class BuildCommand extends Command
             $cacheDirectory = $this->resolveBuildCacheDirectory();
             $installCommand = $this->configArray('install_command');
             $buildCommand = $this->configArray('build_command');
+            $additionalOutputs = $this->configArray('additional_outputs');
             $cache = new FrontendBuildCache(
                 $root,
                 $cacheDirectory,
                 $this->configString('output_directory'),
                 $this->configString('manifest'),
+                $additionalOutputs,
             );
             $inputs = $cache->inputs(
                 $this->configArray('inputs'),
                 $this->configArray('input_patterns'),
             );
-            $fingerprint = $cache->fingerprint($inputs);
+            $fingerprint = $cache->fingerprint($inputs, $installCommand, $buildCommand);
             $this->line("Frontend build fingerprint: $fingerprint");
             $this->line("Build cache: $cacheDirectory");
 
-            if (! $this->option('force') && $cache->has($fingerprint)) {
-                if ($this->option('dry-run')) {
-                    $this->info('Matching frontend build found; it would be restored.');
-
-                    return self::SUCCESS;
+            $force = (bool) $this->option('force');
+            if ($this->option('dry-run')) {
+                if (! $force && $cache->has($fingerprint)) {
+                    $this->info($additionalOutputs === []
+                        ? 'Matching frontend build found; it would be restored.'
+                        : 'Matching frontend build found; dependencies would be installed and outputs restored.');
+                } else {
+                    $this->warn(sprintf(
+                        '%s; %s and %s would run.',
+                        $force ? 'Forced rebuild' : 'No matching frontend build found',
+                        implode(' ', $installCommand),
+                        implode(' ', $buildCommand),
+                    ));
                 }
 
-                $cache->restore($fingerprint);
+                return self::SUCCESS;
+            }
+
+            if ($additionalOutputs !== []) {
+                $this->runProcess($installCommand, $root);
+            }
+
+            if (! $force && $cache->restore($fingerprint)) {
                 $this->info('Restored matching frontend build from cache.');
 
                 return self::SUCCESS;
             }
 
-            if ($this->option('dry-run')) {
-                $this->warn(sprintf(
-                    'No matching frontend build found; %s and %s would run.',
-                    implode(' ', $installCommand),
-                    implode(' ', $buildCommand),
-                ));
-
-                return self::SUCCESS;
+            if ($additionalOutputs === []) {
+                $this->runProcess($installCommand, $root);
             }
-
-            $this->runProcess($installCommand, $root);
             $this->runProcess($buildCommand, $root);
-            $cache->store($fingerprint, (bool) $this->option('force'));
-            $cache->prune((int) config('frontend-build-cache.keep', 5));
+            if (glob($root.'/bootstrap/ssr/*') && ! in_array('bootstrap/ssr', $additionalOutputs, true)
+                && ! in_array($root.'/bootstrap/ssr', $additionalOutputs, true)) {
+                throw new \RuntimeException('SSR output detected. Include bootstrap/ssr in frontend-build-cache.additional_outputs before caching this build.');
+            }
+            $cache->store($fingerprint, $force);
+            $cache->prune((int) config('frontend-build-cache.keep', 5), $fingerprint);
             $this->info('Frontend build completed and cached.');
         } catch (Throwable $exception) {
             $this->error($exception->getMessage());

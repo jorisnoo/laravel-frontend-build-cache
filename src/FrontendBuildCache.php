@@ -9,36 +9,52 @@ use RuntimeException;
 
 final class FrontendBuildCache
 {
-    private const VERSION = 1;
+    private const VERSION = 2;
 
+    /** @var list<string> */
+    private readonly array $outputs;
+
+    /**
+     * @param  list<string>  $additionalOutputs
+     */
     public function __construct(
         private readonly string $root,
         private readonly string $cacheDirectory,
         private readonly string $outputDirectory = 'public/build',
         private readonly string $manifest = 'public/build/manifest.json',
-    ) {}
+        array $additionalOutputs = [],
+    ) {
+        $this->outputs = [$outputDirectory, ...$additionalOutputs];
+        $directories = [rtrim($this->cacheDirectory, '/')];
+        foreach ($this->outputs as $output) {
+            if (trim($output, '/') === '' || in_array('.', explode('/', $output), true)
+                || in_array('..', explode('/', $output), true) || str_contains($output, '//') || str_ends_with($output, '/')) {
+                throw new RuntimeException('Build output directories must be normalized paths without dot segments.');
+            }
+
+            $path = $this->absolutePath($output);
+            if (str_starts_with(rtrim($this->root, '/').'/', $path.'/')) {
+                throw new RuntimeException('Build output must not contain the application root.');
+            }
+            foreach ($directories as $directory) {
+                if (str_starts_with($directory.'/', $path.'/') || str_starts_with($path.'/', $directory.'/')) {
+                    throw new RuntimeException('The build outputs and cache directory must not overlap.');
+                }
+            }
+
+            $directories[] = $path;
+        }
+        $this->manifestRelativeToOutput();
+    }
 
     /**
      * @return string[]
      */
     public function defaultInputs(): array
     {
-        return $this->inputs([
-            'package.json',
-            'package-lock.json',
-            'npm-shrinkwrap.json',
-            '.npmrc',
-            'resources',
-        ], [
-            'vite.config.*',
-            'tailwind.config.*',
-            'postcss.config.*',
-            'webpack.config.*',
-            'tsconfig*.json',
-            'jsconfig*.json',
-            '.env',
-            '.env.*',
-        ]);
+        $config = require __DIR__.'/../config/frontend-build-cache.php';
+
+        return $this->inputs($config['inputs'], $config['input_patterns']);
     }
 
     /**
@@ -59,11 +75,14 @@ final class FrontendBuildCache
 
     /**
      * @param  string[]  $inputs
+     * @param  string[]  $installCommand
+     * @param  string[]  $buildCommand
      */
-    public function fingerprint(array $inputs): string
+    public function fingerprint(array $inputs, array $installCommand = [], array $buildCommand = []): string
     {
         $context = hash_init('sha256');
         hash_update($context, 'laravel-frontend-build-cache-v'.self::VERSION."\0");
+        hash_update($context, serialize([$installCommand, $buildCommand, $this->outputs, $this->manifest])."\0");
 
         foreach ($this->inputFiles($inputs) as $relativePath => $input) {
             hash_update($context, $relativePath."\0");
@@ -93,7 +112,14 @@ final class FrontendBuildCache
 
     public function has(string $fingerprint): bool
     {
-        return is_file($this->cachePath($fingerprint).'/'.$this->manifestRelativeToOutput());
+        $entry = $this->cachePath($fingerprint);
+        foreach (array_keys($this->outputs) as $index) {
+            if (! is_dir($entry.'/'.$index)) {
+                return false;
+            }
+        }
+
+        return is_file($entry.'/0/'.$this->manifestRelativeToOutput());
     }
 
     public function restore(string $fingerprint): bool
@@ -103,23 +129,31 @@ final class FrontendBuildCache
         }
 
         $source = $this->cachePath($fingerprint);
-        $destination = $this->absolutePath($this->outputDirectory);
-        $staging = dirname($destination).'/.'.basename($destination).'-restore-'.bin2hex(random_bytes(6));
+        $staged = [];
 
         try {
-            $this->copyDirectory($source, $staging);
+            foreach ($this->outputs as $index => $output) {
+                $destination = $this->absolutePath($output);
+                $staging = dirname($destination).'/.'.basename($destination).'-restore-'.bin2hex(random_bytes(6));
+                $staged[$staging] = $destination;
+                $this->copyDirectory($source.'/'.$index, $staging);
 
-            if (! is_file($staging.'/'.$this->manifestRelativeToOutput())) {
-                throw new RuntimeException('The restored frontend build does not contain its Vite manifest.');
+                if ($index === 0 && ! is_file($staging.'/'.$this->manifestRelativeToOutput())) {
+                    throw new RuntimeException('The restored frontend build does not contain its Vite manifest.');
+                }
             }
 
-            $this->removeDirectory($destination);
+            foreach ($staged as $staging => $destination) {
+                $this->removeDirectory($destination);
 
-            if (! rename($staging, $destination)) {
-                throw new RuntimeException("Unable to restore the frontend build to $destination");
+                if (! rename($staging, $destination)) {
+                    throw new RuntimeException("Unable to restore the frontend build to $destination");
+                }
             }
         } finally {
-            $this->removeDirectory($staging);
+            foreach (array_keys($staged) as $staging) {
+                $this->removeDirectory($staging);
+            }
         }
 
         return true;
@@ -127,8 +161,6 @@ final class FrontendBuildCache
 
     public function store(string $fingerprint, bool $replace = false): void
     {
-        $source = $this->absolutePath($this->outputDirectory);
-
         if (! is_file($this->absolutePath($this->manifest))) {
             throw new RuntimeException('Vite manifest missing after build.');
         }
@@ -138,9 +170,15 @@ final class FrontendBuildCache
         $staging = $this->cacheDirectory.'/.'.$fingerprint.'-'.bin2hex(random_bytes(6));
 
         try {
-            $this->copyDirectory($source, $staging);
+            foreach ($this->outputs as $index => $output) {
+                $source = $this->absolutePath($output);
+                if (! is_dir($source)) {
+                    throw new RuntimeException("Missing frontend build output: $output");
+                }
+                $this->copyDirectory($source, $staging.'/'.$index);
+            }
 
-            if (! $replace && is_file($destination.'/'.$this->manifestRelativeToOutput())) {
+            if (! $replace && $this->has($fingerprint)) {
                 return;
             }
 
@@ -154,23 +192,31 @@ final class FrontendBuildCache
         }
     }
 
-    public function prune(int $keep = 5): void
+    public function prune(int $keep = 5, ?string $current = null): void
     {
         if (! is_dir($this->cacheDirectory)) {
             return;
         }
 
         $entries = [];
+        $staleBefore = time() - 3600;
 
         foreach (new FilesystemIterator($this->cacheDirectory, FilesystemIterator::SKIP_DOTS) as $entry) {
-            if ($entry->isDir() && preg_match('/^[a-f0-9]{64}$/', $entry->getFilename())) {
-                $entries[$entry->getPathname()] = $entry->getMTime();
+            if (! $entry->isDir() || $entry->isLink()) {
+                continue;
+            }
+
+            $name = $entry->getFilename();
+            if (preg_match('/^[a-f0-9]{64}$/D', $name)) {
+                $entries[$entry->getPathname()] = $name === $current ? PHP_INT_MAX : $entry->getMTime();
+            } elseif (preg_match('/^\.[a-f0-9]{64}-[a-f0-9]{12}$/D', $name) && $entry->getMTime() < $staleBefore) {
+                $this->removeDirectory($entry->getPathname());
             }
         }
 
         arsort($entries);
 
-        foreach (array_slice(array_keys($entries), max(0, $keep)) as $path) {
+        foreach (array_slice(array_keys($entries), max(1, $keep)) as $path) {
             $this->removeDirectory($path);
         }
     }

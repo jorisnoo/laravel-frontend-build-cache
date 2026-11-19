@@ -11,10 +11,12 @@ Release from `main` using an explicit version without a `v` prefix. `CHANGELOG.m
 Configured release checks:
 
 ```sh
-composer test
+composer check
 ```
 
 Install the project’s normal dependencies first. The helper runs these checks when publishing; dry-run prints them without executing them. Run any additional checks needed for the changed behavior before committing.
+
+`composer check` runs strict package validation, a dependency audit, Pint, PHPStan and Pest. The `Package checks` required status aggregates this gate on PHP 8.3–8.5 with Laravel 12 and 13 for every pull request and branch push.
 
 ## Release
 
